@@ -16,6 +16,8 @@ A lightweight macOS menu bar app that displays your currently playing Apple Musi
 
 ## 📸 Preview
 
+![Demo](demo.png)
+
 Your Discord profile will show:
 - "Listening to [Track Name]"
 - Artist name
