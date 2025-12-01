@@ -24,23 +24,29 @@ Your Discord profile will show:
 
 ## 🚀 Installation
 
-### Build from Source
+### Option 1: Download (Recommended)
+
+1. Go to the [Releases](https://github.com/ilNikk/Apple-Music-Discord-Presence/releases) page
+2. Download the latest `MusicDiscordPresence.app.zip`
+3. Unzip and move `MusicDiscordPresence.app` to your Applications folder
+4. Double-click to run!
+
+> ⚠️ On first launch, you may need to right-click → Open to bypass Gatekeeper (the app is not signed with an Apple Developer certificate)
+
+### Option 2: Build from Source
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/YOUR_USERNAME/MusicDiscordPresence.git
-cd MusicDiscordPresence
+git clone https://github.com/ilNikk/Apple-Music-Discord-Presence.git
+cd Apple-Music-Discord-Presence
 ```
 
 2. Build the app:
 ```bash
-swift build -c release
+./build-app.sh
 ```
 
-3. Run it:
-```bash
-.build/release/MusicDiscordPresence
-```
+3. The app will be created as `MusicDiscordPresence.app`
 
 ## 🎮 Usage
 
@@ -53,7 +59,7 @@ swift build -c release
 
 Click the 🎵 icon in your menu bar:
 
-- **Toggle Rich Presence** - Enable/disable the Discord status
+- **Enable Rich Presence** - Toggle the Discord status on/off
 - **Reconnect to Discord** - Manually reconnect if disconnected
 - **Quit** - Exit the application
 
@@ -68,7 +74,7 @@ Click the 🎵 icon in your menu bar:
 To have the app start automatically:
 
 1. Open **System Settings** → **General** → **Login Items**
-2. Click **+** and add the MusicDiscordPresence binary
+2. Click **+** and add MusicDiscordPresence
 
 ## 🛠️ How It Works
 
