@@ -1,9 +1,12 @@
 import Cocoa
+import ServiceManagement
+
+signal(SIGPIPE, SIG_IGN)
 
 class DiscordRPC {
     private var socket: Int32 = -1
     private let clientId: String
-    private var isConnected = false
+    private(set) var isConnected = false
     private var isReady = false
     
     private enum Opcode: UInt32 {
@@ -154,6 +157,8 @@ class DiscordRPC {
     }
     
     private func sendFrame(opcode: Opcode, payload: [String: Any]) -> Bool {
+        guard isConnected, socket != -1 else { return false }
+        
         guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else {
             return false
         }
@@ -170,14 +175,26 @@ class DiscordRPC {
             Darwin.send(socket, ptr.baseAddress, frame.count, 0)
         }
         
+        if sent <= 0 {
+            isConnected = false
+            isReady = false
+            return false
+        }
+        
         return sent == frame.count
     }
     
     private func readFrame() -> [String: Any]? {
+        guard isConnected, socket != -1 else { return nil }
+        
         var header = [UInt8](repeating: 0, count: 8)
         let headerRead = recv(socket, &header, 8, 0)
         
         guard headerRead == 8 else {
+            if headerRead <= 0 {
+                isConnected = false
+                isReady = false
+            }
             return nil
         }
         
@@ -205,13 +222,13 @@ class DiscordRPC {
     }
     
     func disconnect() {
-        if socket != -1 {
-            let _ = sendFrame(opcode: .close, payload: [:])
-            close(socket)
-            socket = -1
-            isConnected = false
-            isReady = false
-        }
+        guard socket != -1 else { return }
+        let sock = socket
+        socket = -1
+        isConnected = false
+        isReady = false
+        let _ = sendFrame(opcode: .close, payload: [:])
+        close(sock)
     }
     
     deinit {
@@ -290,9 +307,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var discord: DiscordRPC!
     var updateTimer: Timer?
+    var reconnectTimer: Timer?
     var lastTrack: String = ""
     var isEnabled = true
+    var isReconnecting = false
     let discordClientId = "1445087052608835676"
+    let appBundleIdentifier = "com.ilnikk.MusicDiscordPresence"
+    let currentVersion = "0.0.2"
+    let githubRepo = "ilNikk/Apple-Music-Discord-Presence"
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -320,6 +342,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         menu.addItem(NSMenuItem.separator())
         
+        let startAtLoginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: "")
+        startAtLoginItem.tag = 102
+        startAtLoginItem.state = isStartAtLoginEnabled() ? .on : .off
+        menu.addItem(startAtLoginItem)
+        
+        let checkUpdatesItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "u")
+        menu.addItem(checkUpdatesItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         
         statusItem.menu = menu
@@ -333,23 +365,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func connectToDiscord() {
+        guard !isReconnecting else { return }
+        isReconnecting = true
+        
         DispatchQueue.global(qos: .background).async { [weak self] in
             let connected = self?.discord.connect() ?? false
             DispatchQueue.main.async {
+                self?.isReconnecting = false
                 if connected {
+                    self?.reconnectTimer?.invalidate()
+                    self?.reconnectTimer = nil
                     self?.updateStatusMenu("✅ Connected to Discord")
                     self?.updatePresence()
                 } else {
                     self?.updateStatusMenu("❌ Discord not connected")
+                    self?.scheduleReconnect()
                 }
             }
         }
     }
     
+    func scheduleReconnect() {
+        guard reconnectTimer == nil else { return }
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            self?.updateStatusMenu("🔄 Reconnecting...")
+            self?.discord.disconnect()
+            self?.isReconnecting = false
+            self?.connectToDiscord()
+        }
+    }
+    
+    func handleConnectionLost() {
+        discord.disconnect()
+        lastTrack = ""
+        updateStatusMenu("⚠️ Connection lost - Reconnecting...")
+        scheduleReconnect()
+    }
+    
     @objc func reconnectDiscord() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
         updateStatusMenu("🔄 Reconnecting...")
         discord.disconnect()
         lastTrack = ""
+        isReconnecting = false
         connectToDiscord()
     }
     
@@ -367,6 +426,109 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             updatePresence()
         }
+    }
+    
+    func isStartAtLoginEnabled() -> Bool {
+        if #available(macOS 13.0, *) {
+            return SMAppService.mainApp.status == .enabled
+        } else {
+            return false
+        }
+    }
+    
+    @objc func toggleStartAtLogin() {
+        if #available(macOS 13.0, *) {
+            do {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                } else {
+                    try SMAppService.mainApp.register()
+                }
+                
+                if let menu = statusItem.menu,
+                   let loginItem = menu.item(withTag: 102) {
+                    loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Cannot change login item"
+                alert.informativeText = "Please add the app manually in System Settings > General > Login Items"
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Not supported"
+            alert.informativeText = "Start at Login requires macOS 13 or later"
+            alert.alertStyle = .informational
+            alert.runModal()
+        }
+    }
+    
+    @objc func checkForUpdates() {
+        let urlString = "https://api.github.com/repos/\(githubRepo)/releases/latest"
+        guard let url = URL(string: urlString) else { return }
+        
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                
+                if let error = error {
+                    self.showUpdateAlert(title: "Update Check Failed", message: "Could not connect to GitHub: \(error.localizedDescription)")
+                    return
+                }
+                
+                guard let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tagName = json["tag_name"] as? String else {
+                    self.showUpdateAlert(title: "Update Check Failed", message: "Could not parse response from GitHub")
+                    return
+                }
+                
+                let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                
+                if self.compareVersions(latestVersion, self.currentVersion) > 0 {
+                    let alert = NSAlert()
+                    alert.messageText = "Update Available"
+                    alert.informativeText = "A new version (\(tagName)) is available. You are running v\(self.currentVersion)."
+                    alert.alertStyle = .informational
+                    alert.addButton(withTitle: "Download")
+                    alert.addButton(withTitle: "Later")
+                    
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        if let downloadURL = URL(string: "https://github.com/\(self.githubRepo)/releases/latest") {
+                            NSWorkspace.shared.open(downloadURL)
+                        }
+                    }
+                } else {
+                    self.showUpdateAlert(title: "You're Up to Date", message: "You are running the latest version (v\(self.currentVersion)).")
+                }
+            }
+        }.resume()
+    }
+    
+    func compareVersions(_ v1: String, _ v2: String) -> Int {
+        let parts1 = v1.split(separator: ".").compactMap { Int($0) }
+        let parts2 = v2.split(separator: ".").compactMap { Int($0) }
+        
+        for i in 0..<max(parts1.count, parts2.count) {
+            let p1 = i < parts1.count ? parts1[i] : 0
+            let p2 = i < parts2.count ? parts2[i] : 0
+            if p1 > p2 { return 1 }
+            if p1 < p2 { return -1 }
+        }
+        return 0
+    }
+    
+    func showUpdateAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.runModal()
     }
     
     func updatePresence() {
@@ -394,6 +556,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         DispatchQueue.main.async {
                             if success {
                                 self?.updateStatusMenu("🎵 \(track.name) - \(track.artist)")
+                            } else if self?.discord.isConnected == false {
+                                self?.handleConnectionLost()
                             }
                         }
                     }
@@ -425,6 +589,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationWillTerminate(_ notification: Notification) {
         updateTimer?.invalidate()
+        reconnectTimer?.invalidate()
         _ = discord.clearActivity()
         discord.disconnect()
     }
